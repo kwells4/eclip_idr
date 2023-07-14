@@ -1,0 +1,68 @@
+# Run IDR on samples
+
+# Need to set up IDR groups
+# pooled pseudo rep1 and 2
+# rep 1 pseudo rep 1 and 2
+# rep 2 pseudo rep 1 and 2
+# rep 1 and rep 2
+
+def _get_idr_input(wildcards):
+	group_1 = full_idr_dict[wildcards.idr_group]["smi_peak1"]
+	group_2 = full_idr_dict[wildcards.idr_group]["smi_peak2"]
+	group_3 = full_idr_dict[wildcards.idr_group]["peak_list"]
+	full_path_1 = os.path.join("results/run_smi", group_1, group_1 + "_peaks_idr.bed")
+	full_path_1 = os.path.abspath(full_path_1)
+	full_path_2 = os.path.join("results/run_smi", group_2, group_2 + "_peaks_idr.bed")
+	full_path_2 = os.path.abspath(full_path_2)
+	full_path_3 = os.path.join("results/run_smi", group_3, group_3 + "_peaks_idr.bed")
+	full_path_3 = os.path.abspath(full_path_3)
+	return[full_path_1, full_path_2, full_path_3]
+
+
+rule make_bed:
+	input:
+		"results/run_smi/{group}/{group}_peaks.bed"
+	output:
+		"results/run_smi/{group}/{group}_peaks_idr.bed"
+	params:
+		job_name    = "{group}_make_bed",
+		memory      = "select[mem>10] rusage[mem=10]"
+
+	log:
+		"results/logs/make_bed/{group}"
+	threads:
+		1
+	script:
+		"../scripts/make_bed.py"
+
+
+rule run_idr:
+	input:
+		_get_idr_input
+	output:
+		idr_peaks = "results/idr/{idr_group}_idr_out.txt",
+		idr_log = "results/idr/{idr_group}_idr_log.txt"
+	params:
+		job_name    = "{idr_group}_idr",
+		memory      = "select[mem>10] rusage[mem=10]"
+
+	log:
+		"results/logs/idr/{idr_group}"
+	threads:
+		1
+	shell:
+		"""
+		idr --samples {input[0]} {input[1]} \
+			--peak-list {input[2]} \
+			--input-file-type bed \
+			--output-file {output.idr_peaks} \
+			--idr-threshold 0.01 \
+			--rank "score" \
+			--log-output-file {output.idr_log} \
+			--plot
+		"""
+
+# removed --allow-negative-scores
+# Then find number of peaks kept for each comparison
+# self-consistency = idr pseudo rep 1 and pseudo rep 2
+# rescue ration = idr rep 1 rep 2 pooled pseudo rep 1 pseudo rep 2

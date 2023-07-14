@@ -1,0 +1,6 @@
+.*
+!.gitignore
+!.gitattributes
+logs
+bam_files
+results

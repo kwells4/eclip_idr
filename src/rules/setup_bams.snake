@@ -1,0 +1,204 @@
+def _get_bams(wildcards):
+	all_bams = []
+	if wildcards.type == "rbfox":
+		for i in reps:
+			all_bams.append(RBFOX_BAMS[i])
+		return(all_bams)
+	else:
+		for i in reps:
+			all_bams.append(INPUT_BAMS[i])
+		return(all_bams)
+
+def _get_downsampled_bams(wildcards):
+	all_bams = []
+	for i in reps:
+		sample_name = wildcards.type + "_" + i
+		output_bam = os.path.join("results/bams", sample_name + "_downsample.bam")
+		all_bams.append(output_bam)
+
+	return(all_bams)
+
+def write_samfile(input_file, output_samfile, subsample_indices):
+	# Iterate over the subsample indices and write the corresponding reads to the output BAM file
+	read_count = 0
+	subsample_indices = set(subsample_indices)
+	with pysam.AlignmentFile(input_file, "rb") as input_sam:
+		for read in input_sam:
+			if read_count in subsample_indices:
+				output_samfile.write(read)
+				subsample_indices.remove(read_count)
+			read_count += 1
+
+	output_samfile.close()
+
+rule downsample_bams:
+	input:
+		input_bams = _get_bams
+	output:
+		"results/bams/{type}_downsample.txt",
+		expand(
+			"results/bams/{{type}}_{rep}.bam",
+			rep = reps
+			),
+		expand(
+			"results/bams/{{type}}_{rep}_pseudo_rep1_downsample.bam",
+			rep = reps
+			),
+		expand(
+			"results/bams/{{type}}_{rep}_pseudo_rep2_downsample.bam",
+			rep = reps
+			)
+	params:
+		job_name  = "{type}_downsample",
+		memory    = "select[mem>100] rusage[mem=100]"
+	log:
+		"results/logs/downsample/downsample_{type}"
+	threads:
+		1
+	run:
+		all_counts = defaultdict(int)
+
+		if wildcards.type == "rbfox":
+			sample_names = ["rbfox_" + i for i in reps]
+		else:
+			sample_names = ["input_" + i for i in reps]
+
+		sample_dict = dict(zip(input.input_bams, sample_names))
+
+		# Find total aligned reads in each sample
+		for i in input.input_bams:
+			# Open the input BAM file
+			input_samfile = pysam.AlignmentFile(i, "rb")
+
+			# Get the total number of reads in the BAM file
+			total_reads = input_samfile.count()
+
+			input_samfile.close()
+
+			all_counts[i] = total_reads
+
+		# Find the sample with the smallest defined reads
+		min_value = min(all_counts.values())
+
+		# Downsample all bams to the lowest aligned count
+		for i in input.input_bams:
+			output_bam = os.path.join("results/bams", sample_dict[i] + "_downsample.bam")
+
+			if(all_counts[i]) != min_value:
+				input_samfile = pysam.AlignmentFile(i, "rb")
+				total_reads = all_counts[i]
+				subsample_indices = random.sample(range(total_reads), min_value)
+				subsample_indices.sort()
+				subsample_indices = set(subsample_indices)
+				# Open a new output BAM file for writing
+				output_samfile = pysam.AlignmentFile(output_bam, "wb", header=input_samfile.header)
+
+				# Iterate over the subsample indices and write the corresponding reads to the output BAM file
+				read_count = 0
+				with pysam.AlignmentFile(i, "rb") as input_sam:
+					for read in input_sam:
+						if read_count in subsample_indices:
+							output_samfile.write(read)
+							subsample_indices.remove(read_count)
+						read_count += 1
+
+				# Close the input and output BAM files
+				input_samfile.close()
+				output_samfile.close()
+			else:
+				shutil.copyfile(i, output_bam)
+
+			# Also make pseudoreplicates, these should all be the same size
+			subset_value = math.floor(min_value / 2)
+			subsample_indices_one = random.sample(range(min_value), subset_value)
+			subsample_indices_two = random.sample(range(min_value), subset_value)
+			output_one = os.path.join("results/bams", sample_dict[i] + "_pseudo_rep1_downsample.bam")
+			output_two = os.path.join("results/bams", sample_dict[i] + "_pseudo_rep2_downsample.bam")
+
+			input_samfile = pysam.AlignmentFile(i, "rb")
+			output_samfile_one = pysam.AlignmentFile(output_one, "wb", header=input_samfile.header)
+			output_samfile_two = pysam.AlignmentFile(output_two, "wb", header=input_samfile.header)
+
+			input_samfile.close()
+			write_samfile(output_bam, output_samfile_one, subsample_indices_one)
+			write_samfile(output_bam, output_samfile_two, subsample_indices_two)
+
+			# Index all files
+			shell(
+				"""
+				samtools index {output_bam}
+				samtools index {output_one}
+				samtools index {output_two}
+				"""
+				)
+
+		with open(output[0], "w") as out:
+			out.write("finished")
+
+rule merge_reps:
+	input:
+		input_bams = _get_downsampled_bams,
+		downsample_result = "results/bams/{type}_downsample.txt"
+	output:
+		bam = "results/bams/{type}_merged.bam",
+		bai = "results/bams/{type}_merged.bam.bai"
+	params:
+		job_name  = "{type}_merge",
+		memory    = "select[mem>100] rusage[mem=100]"
+	log:
+		"results/logs/downsample/merge_{type}"
+	threads:
+		10
+	shell:
+		"""
+		samtools merge -o {output.bam} {input.input_bams}
+		samtools index {output.bam}
+		"""
+
+
+rule downsample_merged:
+	input:
+		input_bams = "results/bams/{type}_merged.bam"
+	output:
+		"results/bams/{type}_downsample_merged.txt"
+	params:
+		job_name  = "{type}_downsample",
+		memory    = "select[mem>100] rusage[mem=100]"
+	log:
+		"results/logs/downsample/merged_downsample_{type}"
+	threads:
+		1
+	run:
+		# Make pseudoreplicates that are each half the size of the full
+		output_bam_one = os.path.join("results/bams", 
+			                          wildcards.type + "_merged_pseudo_rep1_downsample.bam")
+
+		output_bam_two = os.path.join("results/bams", 
+			                          wildcards.type + "_merged_pseudo_rep2_downsample.bam")
+
+		input_samfile = pysam.AlignmentFile(input.input_bams, "rb")
+		total_reads = input_samfile.count()
+		min_value = math.floor(total_reads / 2)
+		subsample_indices_one = random.sample(range(total_reads), min_value)
+		subsample_indices_two = random.sample(range(total_reads), min_value)
+		
+		# Open a new output BAM file for writing
+
+		input_samfile = pysam.AlignmentFile(input.input_bams, "rb")
+		output_samfile_one = pysam.AlignmentFile(output_bam_one, "wb", header=input_samfile.header)
+		output_samfile_two = pysam.AlignmentFile(output_bam_two, "wb", header=input_samfile.header)
+		input_samfile.close()
+
+		write_samfile(input.input_bams, output_samfile_one, subsample_indices_one)
+		write_samfile(input.input_bams, output_samfile_two, subsample_indices_two)
+
+		shell(
+			"""
+			samtools index {output_bam_one}
+			samtools index {output_bam_two}
+			"""
+			)
+
+		with open(output[0], "w") as out:
+			out.write("finished")
+

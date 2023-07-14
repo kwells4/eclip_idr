@@ -1,0 +1,112 @@
+def _get_input_bams(wildcards):
+	return(all_bam_clipper[wildcards.sample])
+
+def _get_manifest_input(wildcards):
+	manifest_dict = manifest_groups[wildcards.group]
+	rbfox_bam = manifest_dict["rbfox_bam"]
+	input_bam = manifest_dict["input_bam"]
+	input_peaks = manifest_dict["input_peaks"]
+	rbfox_peaks = manifest_dict["rbfox_peaks"]
+	return[rbfox_bam, input_bam, input_peaks, rbfox_peaks]
+
+# Note installed clipper from /beevol/home/wellskri/packages/clipper
+rule run_clipper:
+	input:
+		_get_input_bams
+	output:
+		"results/clipper/{sample}_clipper.bed"
+	params:
+		job_name  = "{sample}_clipper",
+		memory    = "select[mem>100] rusage[mem=100]"
+	log:
+		"results/logs/clipper/{sample}"
+	threads:
+		16
+	shell:
+		"""
+		clipper -b {input} -o {output} -s mm10 --processors=16
+		"""
+
+
+# Set up SMI manifest
+# Here I need a few things
+# 1. RBFOX bam
+# 2. RBFOX input
+# 3. Correct peak set for each
+
+rule set_up_manifest:
+	input:
+		_get_manifest_input # Should return the peak and bam files
+	output:
+		"results/smi_manifest/{group}/manifest.txt"
+	params:
+		job_name  = "{group}_manifest",
+		memory    = "select[mem>10] rusage[mem=10]",
+		out_dir   = "results/smi_manifest/{group}"
+	log:
+		"results/logs/manifest/{group}"
+	threads:
+		1
+	run:
+		manifest_dict = manifest_groups[wildcards.group]
+		rbfox_bam = os.path.abspath(manifest_dict["rbfox_bam"])
+		input_bam = os.path.abspath(manifest_dict["input_bam"])
+		rbfox_bai = rbfox_bam + ".bai"
+		input_bai = input_bam + ".bai"
+
+		rbfox_bed = os.path.abspath(manifest_dict["rbfox_peaks"])
+		input_bed = os.path.abspath(manifest_dict["input_peaks"])
+		rbfox_bed_name = re.sub("bam", "peaks.bed", rbfox_bam)
+		rbfox_bed_name = rbfox_bed_name.split("/")[-1]
+		input_bed_name = re.sub("bam", "peaks.bed", input_bam)
+		input_bed_name = input_bed_name.split("/")[-1]
+
+		input_bam_name = input_bam.split("/")[-1]
+		input_bam_path = os.path.join(params.out_dir, input_bam_name)
+
+		rbfox_bam_name = rbfox_bam.split("/")[-1]
+		rbfox_bam_path = os.path.join(params.out_dir, rbfox_bam_name)
+
+		with open(output[0], "w") as out:
+			out.write("001\tRBFOX2\tMIN6\t" + rbfox_bam_path + "\t" + 
+				      input_bam_path)
+
+		# Soft link all files to the appropriate directory
+		shell(
+			"""
+			ln -s {rbfox_bam} {params.out_dir}
+			ln -s {input_bam} {params.out_dir}
+			ln -s {rbfox_bai} {params.out_dir}
+			ln -s {input_bai} {params.out_dir}
+			ln -s {input_bed} {params.out_dir}/{input_bed_name}
+			ln -s {rbfox_bed} {params.out_dir}/{rbfox_bed_name}
+			"""
+			)
+
+
+rule SMI:
+	input:
+		"results/smi_manifest/{group}/manifest.txt"
+	output:
+		peak_file = "results/run_smi/{group}/{group}_peaks.bed", # This is the one I want
+		compressed_file = "results/run_smi/{group}/{group}_peaks_compressed.bed"
+	params:
+		job_name    = "{group}_smi",
+		memory      = "select[mem>50] rusage[mem=50]",
+		output_dir  = "results/run_smi/{group}",
+		outfile_one = "001_01.basedon_001_01.peaks.l2inputnormnew.bed",
+		outfile_two = "001_01.basedon_001_01.peaks.l2inputnormnew.bed.compressed.bed"
+
+	log:
+		"results/logs/smi/{group}"
+	threads:
+		1
+	shell:
+		"""
+		python src/scripts/peak_input_normalization.py \
+			-m {input} -o {params.output_dir}
+
+		mv {params.output_dir}/{params.outfile_one} {output.peak_file}
+		mv {params.output_dir}/{params.outfile_two} {output.compressed_file}
+		"""
+# Change the format of the bed file for IDR
